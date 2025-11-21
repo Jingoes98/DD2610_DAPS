@@ -201,18 +201,61 @@ class mask_generator:
 
 @register_operator(name='inpainting')
 class Inpainting(Operator):
+    """
+    Inpainting operator:
+    - mask = 1: observed region (kept in measurement, used in loss)
+    - mask = 0: missing region (no measurement, no loss, added with priror)
+    """
     def __init__(self, mask_type, mask_len_range=None, mask_prob_range=None, resolution=256, device='cuda',
                  sigma=0.05):
         super().__init__(sigma)
+        self.device = device
         self.mask_gen = mask_generator(mask_type, mask_len_range, mask_prob_range, resolution)
-        self.mask = None  # [B, 1, H, W]
+        self.mask = None  # [B, 1, H, W] and will be broadcasted to [B, C, H, W]
+
+    def _ensure_mask(self, x):
+        """
+        Ensure that the mask is generated and matches the input x shape.
+        """
+        B, C, H, W = x.shape
+        if (self.mask is None
+            or self.mask.shape[0] != B
+            or self.mask.shape[2] != H
+            or self.mask.shape[3] != W):
+            full_mask = self.mask_gen(x).to(x.device)
+            if full_mask.dim() == 4:
+                mask = full_mask[:, 0:1, :, :]  # [B, 1, H, W]
+            else:
+                mask = full_mask # assume already [B, 1, H, W]
+            self.mask = mask.float().to(x.device)
 
     def __call__(self, x):
-        if self.mask is None:
-            self.mask = self.mask_gen(x)
-            self.mask = self.mask[0:1, 0:1, :, :]
-        return x * self.mask
-
+        # if self.mask is None:
+        #     self.mask = self.mask_gen(x)
+        #     self.mask = self.mask[0:1, 0:1, :, :]
+        self._ensure_mask(x)
+        # return x * self.mask
+        return self.mask * x
+    
+    def measure(self, x):
+        """
+        x: [B, C, H, W] the ground truth image
+        """
+        self._ensure_mask(x)
+        y0 = self.mask * x
+        if self.sigma > 0:
+            y0 = y0 + self.sigma * torch.randn_like(y0)
+        return y0
+    
+    def loss(self, x, y):
+        """
+        x: [B, C, H, W] the input image
+        y: [B, C, H, W] the measurement
+        """
+        self._ensure_mask(x)
+        diff = self.mask * x - y
+        return (diff ** 2).flatten(1).sum(-1)
+    
 
 class Blurkernel(nn.Module):
     def __init__(self, blur_type='gaussian', kernel_size=31, std=3.0, device=None):

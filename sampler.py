@@ -9,12 +9,30 @@ from forward_operator import LatentWrapper
 
 
 def get_sampler(**kwargs):
-    latent = kwargs['latent']
-    kwargs.pop('latent')
-    if latent:
-        return LatentDAPS(**kwargs)
-    return DAPS(**kwargs)
-
+    """ Updated for DPS methods"""
+    # latent = kwargs['latent']
+    # kwargs.pop('latent')
+    method = kwargs.pop('method', 'daps')
+    latent = kwargs.pop('latent', False)
+    clip_denoised = kwargs.pop('clip_denoised', True)
+    dynamic_threshold = kwargs.pop('dynamic_threshold', False)
+    rescale_timesteps = kwargs.pop('rescale_timesteps', False)
+    guidance_scale = kwargs.pop('guidance_scale', 1.0)
+    if method == 'dps':
+        kwargs.pop('mcmc_sampler_config', None) # remove mcmc config for DPS method
+        if latent:
+            raise NotImplementedError("LatentDPS is not implemented yet.")
+        return DPS(clip_denoised=clip_denoised,
+                   dynamic_threshold=dynamic_threshold,
+                   guidance_scale=guidance_scale,
+                   **kwargs)
+    elif method == 'daps':
+        if latent:
+            return LatentDAPS(**kwargs)
+        return DAPS(**kwargs)
+    else:
+        raise ValueError(f"Unknown sampling method: {method}")
+    
 
 class DAPS(nn.Module):
     """
@@ -208,3 +226,178 @@ class LatentDAPS(DAPS):
                 self._record(xt, x0y, x0hat, sigma, x0hat_results, x0y_results)
         return xt
 
+class DPS(nn.Module):
+    """
+    Diffusion Posterior Sampling (DPS) implementation.
+    Reference: "Diffusion Posterior Sampling for General Noisy Inverse Problems"
+    (https://arxiv.org/abs/2209.14687)
+    """
+
+    def __init__(self, 
+                 annealing_scheduler_config,
+                 diffusion_scheduler_config,
+                 clip_denoised=True,
+                 dynamic_threshold=False,
+                 rescale_timesteps=False,
+                 guidance_scale=1.0):
+        """
+        Args:
+            - annealing_scheduler_config (dict): Configuration for annealing scheduler.
+            - diffusion_scheduler_config (dict): Configuration for diffusion scheduler.
+            - guidance_scale (float): Strength of measurement guidance
+        """
+        super().__init__()
+        # save configs
+        self.clip_denoised = clip_denoised
+        self.dynamic_threshold = dynamic_threshold
+        self.guidance_scale = guidance_scale
+        # check updates
+        annealing_scheduler_config, diffusion_scheduler_config = self._check(annealing_scheduler_config,
+                                                                             diffusion_scheduler_config)
+        # initialize schedulers
+        self.annealing_scheduler = get_diffusion_scheduler(**annealing_scheduler_config)
+        self.diffusion_scheduler_config = diffusion_scheduler_config
+
+    def sample(self, model, x_start, operator, measurement, evaluator=None,
+               record=False, verbose=False, **kwargs):
+        """
+        DPS sampling with measurement guidance.
+        core idea: x0|y = x0hat - guidance_scale*sigma_t*∇_{x0} ||A(x0) - y||^2 / 2
+        Args:
+            - model: diffusion model: get x0hat from xt
+            - x_start: initial tensor/state of shape (B, C, H, W)
+            - operator: measurement operator A
+            - measurement: observed measurement tensor y
+            - evaluator: evaluator for monitoring performance
+            - record: whether to record intermediate states and metrics
+            - verbose: whether to enable progress bar
+        returns:
+            - final sampled tensor/state
+        """
+        if record:
+            self.trajectory = Trajectory()
+        
+        pbar = tqdm.trange(self.annealing_scheduler.num_steps - 1) if verbose else range(self.annealing_scheduler.num_steps - 1)
+        xt = x_start
+        
+        for step in pbar:
+            sigma = self.annealing_scheduler.sigma_steps[step]
+
+            # 1. Predict x0hat from xt using the diffusion model
+            with torch.no_grad():
+                diffusion_scheduler = get_diffusion_scheduler(
+                    **self.diffusion_scheduler_config,
+                    sigma_max=sigma
+                )
+                sampler = DiffusionPFODE(model, diffusion_scheduler, solver='euler')
+                x0hat = sampler.sample(xt)  # predicted noise-free sample
+
+                if self.clip_denoised:
+                    x0hat = self._clip_sample(x0hat)
+            
+            # 2. Measurement guided update
+            # compute gradient ∇_{x0} ||A(x0) - y||^2 / (2 * sigma_y^2)
+            x0hat_grad = x0hat.clone().detach().requires_grad_(True)
+            y_pred = operator(x0hat_grad)
+            # data loss (DPS paper: loss = ||A(x0) - y||^2 / (2 * sigma_y^2))
+            data_loss = torch.norm(y_pred - measurement)**2 / (2 * operator.sigma ** 2)
+            # gradient
+            grad = torch.autograd.grad(data_loss, x0hat_grad)[0]
+            # guided update (DPS paper: x0y = x0hat - guidance_scale * sigma_t * grad)
+            x0y = x0hat - self.guidance_scale * sigma * grad 
+
+            if hasattr(operator, "mask") and operator.mask is not None:
+                M = operator.mask.to(x0y.device)          # [1,1,H,W]
+                x0y = M * measurement + (1.0 - M) * x0y
+
+            # # Use operator's gradient method (handles task-specific gradient computation)
+            # # Operator's loss already includes normalization by sigma^2
+            # x0hat_grad = x0hat.clone().detach()
+            # grad, data_loss = operator.gradient(x0hat_grad, measurement, return_loss=True)
+            # # guided update (DPS paper: x0y = x0hat - guidance_scale * sigma_t * grad)
+            # x0y = x0hat - self.guidance_scale * sigma * grad 
+
+            if self.clip_denoised:
+                x0y = self._clip_sample(x0y)
+
+            # 3. Forward diffusion
+            if step != self.annealing_scheduler.num_steps - 1:
+                xt = x0y + torch.randn_like(x0y) * self.annealing_scheduler.sigma_steps[step + 1]
+                if self.clip_denoised:
+                    xt = self._clip_sample(xt)
+            else:
+                xt = x0y
+
+            # # debug info
+            # if step % 200 == 0:
+            #     mask = operator.mask.to(x0y.device)
+            #     missing = (1-mask)
+            #     print(f"[step {step}] missing_mean_abs(x0y) = {(x0y*missing).abs().mean().item():.4f}")
+            #     print(f"[step {step}] missing_mean_abs(xt)   = {(xt*missing).abs().mean().item():.4f}")
+            # # debug info
+
+            # 4. Evaluation
+            x0hat_results = x0y_results = {}
+            if evaluator and 'gt' in kwargs:
+                with torch.no_grad():
+                    gt = kwargs['gt']  # ground truth
+                    x0hat_results = evaluator(gt, measurement, x0hat)
+                    x0y_results = evaluator(gt, measurement, x0y)
+
+                # record
+                if verbose:
+                    main_eval_fn_name = evaluator.main_eval_fn_name
+                    pbar.set_postfix({
+                        'x0hat' + '_' + main_eval_fn_name: f"{x0hat_results[main_eval_fn_name].item():.2f}",
+                        'x0y' + '_' + main_eval_fn_name: f"{x0y_results[main_eval_fn_name].item():.2f}",
+                    })
+            
+            if record:
+                self._record(xt, x0y, x0hat, sigma, x0hat_results, x0y_results)
+        
+        return xt
+    
+    def _clip_sample(self, x):
+        if self.dynamic_threshold:
+            # Dynamic thresholding (Imagen paper)
+            s = torch.quantile(torch.abs(x).reshape(x.shape[0], -1), 0.995, dim=1)
+            s = s.view(-1, 1, 1, 1)  # Reshape for broadcasting
+            x = torch.clamp(x, -s, s) / s
+        else:
+            # Fixed thresholding
+            x = torch.clamp(x, -1.0, 1.0)
+        return x
+    
+    def _record(self, xt, x0y, x0hat, sigma, x0hat_results, x0y_results):
+        """Records the intermediate states during sampling."""
+        self.trajectory.add_tensor(f'xt', xt)
+        self.trajectory.add_tensor(f'x0y', x0y)
+        self.trajectory.add_tensor(f'x0hat', x0hat)
+        self.trajectory.add_value(f'sigma', sigma)
+        for name in x0hat_results.keys():
+            self.trajectory.add_value(f'x0hat_{name}', x0hat_results[name])
+        for name in x0y_results.keys():
+            self.trajectory.add_value(f'x0y_{name}', x0y_results[name])
+    
+    def _check(self, annealing_scheduler_config, diffusion_scheduler_config):
+        """Checks and updates the configurations for the schdulers."""
+        # sigma_max of diffusion schuduler change each step
+        if 'sigma_max' in diffusion_scheduler_config:
+            diffusion_scheduler_config.pop('sigma_max')
+
+        return annealing_scheduler_config, diffusion_scheduler_config
+    
+    def get_start(self, batch_size, model):
+        """
+        Generates initial random state tensors from the Gaussian prior.
+        
+        Args:
+            - batch_size (int): number of initial states to generate.
+            - model (nn.module): diffusion or latent diffusion model.
+        Returns:
+            - torch.Tensor: random initial tensor.
+        """
+        device = next(model.parameters()).device # get device from model
+        in_shape = model.get_in_shape()
+        x_start = torch.randn(batch_size, *in_shape, device=device) * self.annealing_scheduler.get_prior_sigma()
+        return x_start

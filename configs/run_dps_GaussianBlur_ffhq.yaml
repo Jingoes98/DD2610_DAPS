@@ -1,0 +1,34 @@
+defaults:
+  - data: demo-ffhq          # configs/data/demo-ffhq.yaml
+  - task: gaussian_blur    # configs/task/gaussian_blur.yaml   
+  - model: ffhq256ddpm       # configs/model/ffhq256ddpm.yaml
+  - sampler: ddpm        # configs/sampler/edm_daps.yaml
+  - _self_  
+
+# Experiment settings
+gpu: 0
+batch_size: 10
+num_runs: 1
+save_dir: ./results
+name: ffhq_demo_1118_1_dps_gaussian_blur_debug
+
+# Task configuration
+task_group: pixel  # pixel, sd, or latent
+
+# Evaluation
+eval_fn_list: ['psnr', 'ssim', 'lpips']
+eval_fid: False
+show_eval: False
+
+# Save options
+save_samples: True
+save_traj: False
+save_traj_video: False
+save_traj_raw_data: False
+
+# WandB logging
+wandb: False
+project_name: 'DPS'
+
+# Random seed
+seed: 42

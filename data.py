@@ -64,9 +64,17 @@ class ImageDataset(DiffusionData):
 
     def __init__(self, root='dataset/demo', resolution=256, device='cuda', start_id=None, end_id=None):
         # Define the file extensions to search for
-        extensions = ['*.jpg', '*.JPG', '*.jpeg', '*.JPEG', '*.png', '*.PNG']
+        # extensions = ['*.jpg', '*.JPG', '*.jpeg', '*.JPEG', '*.png', '*.PNG']
+        extensions = ['*.jpg', '*.jpeg', '*.png']
         self.data = [file for ext in extensions for file in Path(root).rglob(ext)]
         self.data = sorted(self.data)
+
+        # Debugging information
+        print(f"\n[ImageDataset.__init__] Debug Info:")
+        print(f"  root: {root}")
+        print(f"  Total files found: {len(self.data)}")
+        print(f"  start_id: {start_id}")
+        print(f"  end_id: {end_id}")
 
         # Subset the dataset
         self.data = self.data[start_id: end_id]
@@ -79,7 +87,8 @@ class ImageDataset(DiffusionData):
         self.device = device
 
     def __getitem__(self, i):
-        img = (self.trans(Image.open(self.data[i])) * 2 - 1).to(self.device)
+        img = Image.open(self.data[i]).convert('RGB')  # Force RGB to handle RGBA images
+        img = (self.trans(img) * 2 - 1).to(self.device)
         if img.shape[0] == 1:
             img = torch.cat([img] * 3, dim=0)
         return img

@@ -61,6 +61,19 @@ class Scheduler(ABC):
     def get_scaling(self, t):
         pass
     
+    @abstractmethod
+    def get_sigma_inv(self, sigma):
+        """
+        Inverse function: compute timestep from noise level.
+        
+        Args:
+            sigma (float or torch.Tensor): Noise level
+            
+        Returns:
+            torch.Tensor: Corresponding timestep
+        """
+        pass
+
     def get_sigma(self, t):
         pass
     
@@ -183,6 +196,29 @@ class VPScheduler(Scheduler):
         # sigma(t) = sqrt(1 / alpha(t) - 1)
         t = self.tensorize(t)
         return torch.sqrt(1 / self.get_alpha(t) - 1)
+    
+    def get_sigma_inv(self, sigma):
+        """
+        Find timestep corresponding to noise level sigma.
+        Uses binary search on discretized sigma steps.
+        
+        Args:
+            sigma (float or torch.Tensor): Target noise level
+            
+        Returns:
+            torch.Tensor: Corresponding timestep t
+        """
+        if isinstance(sigma, (int, float)):
+            sigma = torch.tensor(sigma, dtype=torch.float32)
+        
+        # Get all sigma values
+        sigma_steps = self.get_sigmas()
+        
+        # Find closest sigma using binary search
+        idx = torch.argmin(torch.abs(sigma_steps - sigma))
+        t = self.time_steps[idx]
+        
+        return t
 
     def get_scaling_derivative(self, t):
         # s'(t) = -s(t) * beta(t) / 2
@@ -229,6 +265,30 @@ class VEScheduler(Scheduler):
         # sigma(t) = sqrt(t)
         t = self.tensorize(t)
         return t.sqrt()
+    
+    def get_sigma_inv(self, sigma):
+        """
+        Analytical inverse for VE scheduler.
+        
+        sigma(t) = sigma_min * (sigma_max/sigma_min)^t
+        => t = log(sigma/sigma_min) / log(sigma_max/sigma_min)
+        
+        Args:
+            sigma (float or torch.Tensor): Target noise level
+            
+        Returns:
+            torch.Tensor: Corresponding timestep t
+        """
+        if isinstance(sigma, (int, float)):
+            sigma = torch.tensor(sigma, dtype=torch.float32)
+        
+        # Analytical solution
+        t = torch.log(sigma / self.sigma_min) / torch.log(self.sigma_max / self.sigma_min)
+        
+        # Clamp to valid range [0, 1]
+        t = torch.clamp(t, 0.0, 1.0)
+        
+        return t
 
     def get_scaling(self, t):
         # s(t) = 1
@@ -287,6 +347,33 @@ class EDMScheduler(Scheduler):
     def get_sigma(self, t):
         # sigma(t) = t
         return self.tensorize(t)
+    
+    def get_sigma_inv(self, sigma):
+        """
+        Inverse for EDM's polynomial time mapping.
+        
+        For poly-7 schedule:
+        sigma(t) = (sigma_max^(1/rho) + t*(sigma_min^(1/rho) - sigma_max^(1/rho)))^rho
+        
+        Args:
+            sigma (float or torch.Tensor): Target noise level
+            
+        Returns:
+            torch.Tensor: Corresponding timestep t
+        """
+        if isinstance(sigma, (int, float)):
+            sigma = torch.tensor(sigma, dtype=torch.float32)
+        
+        rho = 7  # EDM default
+        
+        # Inverse of polynomial mapping
+        t = (sigma**(1/rho) - self.sigma_max**(1/rho)) / \
+            (self.sigma_min**(1/rho) - self.sigma_max**(1/rho))
+        
+        # Clamp to valid range [0, 1]
+        t = torch.clamp(t, 0.0, 1.0)
+        
+        return t
 
     def get_scaling(self, t):
         # s(t) = 1
@@ -334,6 +421,17 @@ class TrigFlowScheduler(Scheduler):
     def get_sigma(self, t):
         # sigma(t) = tan(t)
         return torch.tan(self.tensorize(t))
+    
+    def get_sigma_inv(self, sigma):
+        """Find closest discretized timestep."""
+        if isinstance(sigma, (int, float)):
+            sigma = torch.tensor(sigma, dtype=torch.float32)
+        
+        sigma_steps = self.get_sigmas()
+        idx = torch.argmin(torch.abs(sigma_steps - sigma))
+        t = self.time_steps[idx]
+        
+        return t
 
     def get_scaling(self, t):
         # s(t) = cos(t)
@@ -362,6 +460,102 @@ class TrigFlowScheduler(Scheduler):
     def get_discrete_time_steps(self, num_steps):
         return torch.linspace(self.get_t_max().item(), self.get_t_min().item(), num_steps)
 
+@register_diffusion_scheduler('ddpm')
+class DDPMScheduler(VPScheduler):
+    """
+    DDPM (Denoising Diffusion Probabilistic Models) Scheduler.
+    
+    This is essentially a VP scheduler with specific default parameters
+    matching the original DDPM paper.
+    Reference: "Denoising Diffusion Probabilistic Models" (Ho et al., 2020)
+    """
+    
+    def __init__(self, num_steps, beta_start=0.0001, beta_end=0.02, 
+                 noise_schedule='linear', timestep_respacing=None,
+                 model_mean_type='epsilon', model_var_type='learned_range',
+                 sigma_max=None):
+        """
+        Args:
+            num_steps (int): Number of diffusion steps
+            beta_start (float): Starting value of beta schedule
+            beta_end (float): Ending value of beta schedule
+            noise_schedule (str): Type of noise schedule ('linear' or 'scaled_linear')
+            timestep_respacing (str): Timestep respacing strategy (e.g., '1000', '250')
+            model_mean_type (str): Type of model mean prediction ('epsilon', 'x_start', 'x_prev')
+            model_var_type (str): Type of model variance ('fixed_small', 'fixed_large', 'learned', 'learned_range')
+            sigma_max (float, optional): Override max sigma (for DPS dynamic scheduling)
+        """
+        # Map DDPM parameter names to VP parameter names
+        beta_type = 'linear' if noise_schedule == 'linear' else 'scaled_linear'
+        
+        # Initialize VP scheduler with DDPM parameters
+        super().__init__(
+            num_steps=num_steps,
+            beta_min=beta_start,
+            beta_max=beta_end,
+            beta_type=beta_type,
+            epsilon=1e-5
+        )
+        
+        # Store DDPM-specific parameters (for compatibility)
+        self.beta_start = beta_start
+        self.beta_end = beta_end
+        self.noise_schedule = noise_schedule
+        self.timestep_respacing = timestep_respacing
+        self.model_mean_type = model_mean_type
+        self.model_var_type = model_var_type
+        
+        # Override sigma_max if provided
+        if sigma_max is not None:
+            # Create temporary scheduler with single step at target sigma
+            self._override_sigma_max(sigma_max)
+    
+    def _override_sigma_max(self, sigma_max):
+        """Override sigma_max for dynamic scheduling (DPS use case)."""
+        # Find timestep corresponding to target sigma
+        t = self.get_sigma_inv(sigma_max)
+        
+        # Create new time_steps array with just this timestep
+        self.time_steps = torch.tensor([t.item(), self.get_t_min().item()])
+        self.discretize(self.time_steps)
+    
+    def get_betas(self):
+        """
+        Get the beta schedule as a numpy array.
+        This matches the original DDPM implementation.
+        """
+        if self.noise_schedule == 'linear':
+            return np.linspace(self.beta_start, self.beta_end, self.num_steps)
+        elif self.noise_schedule == 'scaled_linear':
+            # Scaled linear schedule from Improved DDPM
+            return np.linspace(self.beta_start**0.5, self.beta_end**0.5, self.num_steps)**2
+        else:
+            raise ValueError(f"Unknown noise schedule: {self.noise_schedule}")
+    
+    def get_alphas_cumprod(self):
+        """Get cumulative product of (1 - beta)."""
+        betas = self.get_betas()
+        alphas = 1.0 - betas
+        alphas_cumprod = np.cumprod(alphas, axis=0)
+        return alphas_cumprod
+    
+    def summary(self):
+        """Print summary with DDPM-specific information."""
+        print('+' * 50)
+        print('DDPM Scheduler Summary')
+        print('+' * 50)
+        print(f"Scheduler          : {self.name}")
+        print(f"Num Steps          : {self.num_steps}")
+        print(f"Beta Start         : {self.beta_start}")
+        print(f"Beta End           : {self.beta_end}")
+        print(f"Noise Schedule     : {self.noise_schedule}")
+        print(f"Model Mean Type    : {self.model_mean_type}")
+        print(f"Model Var Type     : {self.model_var_type}")
+        print(f"Timestep Respacing : {self.timestep_respacing}")
+        print(f"Time Range         : [{self.get_t_min().item()}, {self.get_t_max().item()}]")
+        print(f"Sigma Range        : [{self.get_sigma_min().item()}, {self.get_sigma_max().item()}]")
+        print(f"Prior Sigma        : {self.get_prior_sigma().item()}")
+        print('+' * 50)
 
 class DiffusionPFODE:
     """

@@ -1,0 +1,34 @@
+defaults:
+  - data: demo-ffhq          # configs/data/test-ffhq.yaml
+  - task: inpainting    # configs/task/inpainting.yaml
+  - model: ffhq256ddpm       # configs/model/ffhq256ddpm.yaml
+  - sampler: ddpm        # configs/sampler/edm_daps.yaml
+  - _self_  
+
+# Experiment settings
+gpu: 0
+batch_size: 10
+num_runs: 1
+save_dir: ./results
+name: dps_ffhq_demo_inpainting_debug
+
+# Task configuration
+task_group: pixel  # pixel, sd, or latent
+
+# Evaluation
+eval_fn_list: ['psnr', 'ssim', 'lpips']
+eval_fid: False
+show_eval: False
+
+# Save options
+save_samples: True
+save_traj: False
+save_traj_video: False
+save_traj_raw_data: False
+
+# WandB logging
+wandb: False
+project_name: 'DPS'
+
+# Random seed
+seed: 42

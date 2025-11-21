@@ -1,0 +1,24 @@
+method: dps 
+latent: False
+guidance_scale: 1.0 
+
+clip_denoised: True # clip the denoise samples to [-1, 1]
+dynamic_threshold: False  # use fixed thresholding
+rescale_timesteps: False  # do not rescale timesteps
+
+annealing_scheduler_config:
+  name: 'ddpm'  # use ddps scheduler for dps
+  num_steps: 1000
+  noise_schedule: 'linear'  
+  beta_start: 0.0001
+  beta_end: 0.02
+  timestep_respacing: 1000
+  model_mean_type: epsilon
+  model_var_type: learned_range
+
+diffusion_scheduler_config:
+  name: 'ddpm'
+  num_steps: 1  # dps only use one diffusion step
+  noise_schedule: 'linear'
+  model_mean_type: 'epsilon'
+  model_var_type: 'learned_range'
