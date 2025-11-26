@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env_dd2610/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDEs
+.idea/
+.vscode/
+
+# Large directories - Model checkpoints and data
+checkpoints/
+dataset/
+outputs/
+results/
+
+# Temporary files
+*.log
+*.tmp
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Hydra
+.hydra/
+multirun/
+
+# Weights & Biases
+wandb/
+
+# Model weights and archives
+*.pt
+*.pth
+*.ckpt
+*.zip
+*.tar
+*.tar.gz
+*.rar
+
+# Videos
+*.mp4
+*.avi
+*.mov

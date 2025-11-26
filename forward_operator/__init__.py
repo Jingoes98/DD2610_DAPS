@@ -85,7 +85,11 @@ class Operator(ABC):
         Returns:
             torch.Tensor: Loss values (one per sample).
         """
-        return ((self(x) - y) ** 2).flatten(1).sum(-1)
+        output = self(x)
+        # Ensure y is on the same device as output
+        if y.device != output.device:
+            y = y.to(output.device)
+        return ((output - y) ** 2).flatten(1).sum(-1)
 
     def gradient(self, x, y, return_loss=False):
         """
@@ -213,27 +217,26 @@ class Inpainting(Operator):
         self.mask_gen = mask_generator(mask_type, mask_len_range, mask_prob_range, resolution)
         self.mask = None  # [B, 1, H, W] and will be broadcasted to [B, C, H, W]
 
-    def _ensure_mask(self, x):
+    def _init_mask(self, x):
         """
-        Ensure that the mask is generated and matches the input x shape.
+        Initialize the mask based on input x
         """
+        if self.mask is not None:
+            return
         B, C, H, W = x.shape
-        if (self.mask is None
-            or self.mask.shape[0] != B
-            or self.mask.shape[2] != H
-            or self.mask.shape[3] != W):
-            full_mask = self.mask_gen(x).to(x.device)
-            if full_mask.dim() == 4:
-                mask = full_mask[:, 0:1, :, :]  # [B, 1, H, W]
-            else:
-                mask = full_mask # assume already [B, 1, H, W]
-            self.mask = mask.float().to(x.device)
+        full_mask = self.mask_gen(x).to(x.device)   # [B, C, H, W]
+        if full_mask.dim() == 4:
+            mask = full_mask[0:1, 0:1, :, :]        # [1, 1, H, W]
+        else:
+            mask = full_mask
+        self.mask = mask.float().to(x.device)
+        self.mask = (self.mask > 0.5).float()
 
     def __call__(self, x):
         # if self.mask is None:
         #     self.mask = self.mask_gen(x)
         #     self.mask = self.mask[0:1, 0:1, :, :]
-        self._ensure_mask(x)
+        self._init_mask(x)
         # return x * self.mask
         return self.mask * x
     
@@ -241,7 +244,7 @@ class Inpainting(Operator):
         """
         x: [B, C, H, W] the ground truth image
         """
-        self._ensure_mask(x)
+        self._init_mask(x)
         y0 = self.mask * x
         if self.sigma > 0:
             y0 = y0 + self.sigma * torch.randn_like(y0)
@@ -252,7 +255,7 @@ class Inpainting(Operator):
         x: [B, C, H, W] the input image
         y: [B, C, H, W] the measurement
         """
-        self._ensure_mask(x)
+        self._init_mask(x)
         diff = self.mask * x - y
         return (diff ** 2).flatten(1).sum(-1)
     
@@ -280,19 +283,25 @@ class Blurkernel(nn.Module):
             n[self.kernel_size // 2, self.kernel_size // 2] = 1
             k = scipy.ndimage.gaussian_filter(n, sigma=self.std)
             k = torch.from_numpy(k)
+            if self.device is not None:
+                k = k.to(self.device)
             self.k = k
             for name, f in self.named_parameters():
                 f.data.copy_(k)
         elif self.blur_type == "motion":
             k = Kernel(size=(self.kernel_size, self.kernel_size), intensity=self.std).kernelMatrix
             k = torch.from_numpy(k)
+            if self.device is not None:
+                k = k.to(self.device)
             self.k = k
             for name, f in self.named_parameters():
                 f.data.copy_(k)
 
     def update_weights(self, k):
         if not torch.is_tensor(k):
-            k = torch.from_numpy(k).to(self.device)
+            k = torch.from_numpy(k)
+        if self.device is not None:
+            k = k.to(self.device)
         for name, f in self.named_parameters():
             f.data.copy_(k)
 
@@ -310,7 +319,7 @@ class GaussianBlur(Operator):
                                kernel_size=kernel_size,
                                std=intensity,
                                device=device).to(device)
-        self.kernel = self.conv.get_kernel()
+        self.kernel = self.conv.get_kernel().to(device)
         self.conv.update_weights(self.kernel.type(torch.float32))
         self.conv.requires_grad_(False)
 
@@ -327,10 +336,10 @@ class MotionBlur(Operator):
         self.conv = Blurkernel(blur_type='motion',
                                kernel_size=kernel_size,
                                std=intensity,
-                               device=device).to(device)  # should we keep this device term?
+                               device=device).to(device)
 
         self.kernel = Kernel(size=(kernel_size, kernel_size), intensity=intensity)
-        kernel = torch.tensor(self.kernel.kernelMatrix, dtype=torch.float32)
+        kernel = torch.tensor(self.kernel.kernelMatrix, dtype=torch.float32).to(device)
         self.conv.update_weights(kernel)
         self.conv.requires_grad_(False)
 

@@ -1,0 +1,34 @@
+defaults:
+  - data: test-ffhq          # configs/data/test-ffhq.yaml          
+  - task: phase_retrieval    # configs/task/phase_retrieval.yaml
+  - model: ffhq256ldm        # configs/model/ffhq256ldm.yaml
+  - sampler: latent_edm_daps        # configs/sampler/latent_edm_daps.yaml
+  - _self_  
+
+# Experiment settings
+gpu: 0
+batch_size: 5
+num_runs: 3
+save_dir: ./results
+name: latent_daps_phase_retrieval_ffhq30
+
+# Task configuration
+task_group: ldm
+
+# Evaluation
+eval_fn_list: ['psnr', 'ssim', 'lpips']
+eval_fid: False
+show_eval: False
+
+# Save options
+save_samples: True
+save_traj: False
+save_traj_video: False
+save_traj_raw_data: False
+
+# WandB logging
+wandb: False
+project_name: 'DAPS'
+
+# Random seed
+seed: 42

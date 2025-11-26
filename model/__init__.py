@@ -7,7 +7,7 @@ import importlib
 from abc import abstractmethod
 from .ddpm.unet import create_model
 from .precond import VPPrecond, LatentDMWrapper
-from diffusers import StableDiffusionPipeline
+from diffusers import StableDiffusionPipeline, DDPMPipeline
 from cores.scheduler import VPScheduler
 
 
@@ -98,6 +98,80 @@ class LatentDiffusionModel(nn.Module):
     def get_in_shape(self):
         pass
 
+@register_model(name='ddpm_celeba256')
+class CelebA256DiffusersDDPM(DiffusionModel):
+    """
+    Wraps HuggingFace DDPM model UNet for DAPS framework.
+    Convers episilon prediction into x0hat prediction."""
+
+    def __init__(self, model_id: str = "google/ddpm-celebahq-256", device='cuda', requires_grad=False):
+        super().__init__()
+        pipe = DDPMPipeline.from_pretrained(model_id)
+
+        self.unet = pipe.unet
+        self.scheduler = pipe.scheduler  # diffusion scheduler
+        self.device = device
+
+        alphas_cumprod = self.scheduler.alphas_cumprod
+        if isinstance(alphas_cumprod, torch.Tensor):
+            self.register_buffer("alphas_cumprod", alphas_cumprod.clone())
+        else:
+            self.register_buffer("alphas_cumprod", torch.tensor(alphas_cumprod))
+
+        self.in_channels = self.unet.config.in_channels
+        self.resolution = self.unet.config.sample_size
+
+        self.unet.requires_grad_(requires_grad)
+        self.unet.eval()
+    
+    def get_in_shape(self):
+        """Used by sampler.get_start()"""
+        return (self.in_channels, self.resolution, self.resolution)
+    
+    def _sigma_to_t(self, sigma):
+        """
+        Diffusers use discrete timesteps, while DAPS uses continuous noise levels (sigma_t) at each step.
+        """
+        sigmas = torch.sqrt(1.0 - self.alphas_cumprod).to(sigma.device)
+
+        if sigma.ndim == 0:
+            sigma = sigma[None]
+        
+        sigma = sigma.to(sigma.dtype).view(-1) # (B,)
+
+        d = (sigmas[None, :] - sigma[:, None]).abs()
+        t = d.argmin(dim=1).long()
+        return t
+    
+    def _predict_x0_from_eps(self, x_t, eps, t):
+
+        alpha_cumprod_t = self.alphas_cumprod[t].to(x_t.device).view(-1, 1, 1, 1)  # (B, 1, 1, 1)
+
+        x0 = (x_t - torch.sqrt(1 - alpha_cumprod_t) * eps) / torch.sqrt(alpha_cumprod_t)
+        return x0
+
+    # IMPORTANT: this is the API function that PF-ODE sampler will call
+    def tweedie(self, x, sigma):
+        """
+        DAPS expects: model(xt, sigma_t) -> x0hat
+        To do so, convert sigma_t to discrete timestep t
+        """
+        B = x.shape[0]
+        device = x.device
+
+        if not torch.is_tensor(sigma):
+            sigma = torch.tensor([sigma], device=device).expand(B)
+        elif sigma.ndim == 0:
+            sigma = sigma[None].expand(B)
+        else:
+            sigma = sigma.to(device)
+
+        t = self._sigma_to_t(sigma)
+
+        eps = self.unet(x, t).sample
+
+        x0 = self._predict_x0_from_eps(x, eps, t)
+        return x0
 
 @register_model(name='ddpm')
 class DDPM(DiffusionModel):

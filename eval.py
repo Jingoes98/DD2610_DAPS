@@ -168,6 +168,13 @@ def get_eval_fn_cmp(name: str):
 class EvalFn(ABC):
     def norm(self, x):
         return (x * 0.5 + 0.5).clip(0, 1)
+    
+    def ensure_same_device(self, *tensors):
+        """Ensure all tensors are on the same device as the first tensor"""
+        if len(tensors) == 0:
+            return tensors
+        device = tensors[0].device
+        return tuple(t.to(device) if t.device != device else t for t in tensors)
 
     @abstractmethod
     def __call__(self, gt, measurement, sample, reduction='none'):
@@ -179,6 +186,7 @@ class PeakSignalNoiseRatio(EvalFn):
     cmp = 'max'  # the higher, the better
 
     def __call__(self, gt, measurement, sample, reduction='none'):
+        gt, sample = self.ensure_same_device(gt, sample)
         return psnr(self.norm(gt), self.norm(sample), data_range=1.0, reduction=reduction)
 
 
@@ -187,6 +195,7 @@ class StructuralSimilarityIndexMeasure(EvalFn):
     cmp = 'max'  # the higher, the better
 
     def __call__(self, gt, measurement, sample, reduction='none'):
+        gt, sample = self.ensure_same_device(gt, sample)
         return ssim(self.norm(gt), self.norm(sample), data_range=1.0, reduction=reduction)
 
 
@@ -208,6 +217,7 @@ class LearnedPerceptualImagePatchSimilarity(EvalFn):
         return results
 
     def __call__(self, gt, measurement, sample, reduction='none'):
+        gt, sample = self.ensure_same_device(gt, sample)
         res = self.evaluate_in_batch(gt, sample)
         if reduction == 'mean':
             res = res.mean()

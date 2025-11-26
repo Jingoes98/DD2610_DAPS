@@ -32,12 +32,12 @@ pixel_hmc:
 # latent diffusion model
 ldm: 
   mcmc_sampler_config: 
-    num_steps: 65
-    lr: 2.1e-5
+    num_steps: 50 # 65
+    lr: 4e-6 # 2.1e-5
     tau: 0.01
-    lr_min_ratio: 0.12
+    lr_min_ratio: 0.01 # 0.12
     momentum: 0.41
-    mc_algo: hmc
+    mc_algo: langevin # hmc
     prior_solver: gaussian
 
   operator:

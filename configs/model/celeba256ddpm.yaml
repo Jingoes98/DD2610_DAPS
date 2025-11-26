@@ -1,0 +1,8 @@
+name: "ddpm_celeba256"
+
+# HuggingFace model id
+model_id: "google/ddpm-celebahq-256"
+
+# device and grad control
+device: "cuda"
+requires_grad: False
