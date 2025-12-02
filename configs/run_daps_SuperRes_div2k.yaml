@@ -1,24 +1,24 @@
 defaults:
-  - data: test-ffhq
-  - task: phase_retrieval    # configs/task/phase_retrieval.yaml
-  - model: ffhq256ddpm       # configs/model/ffhq256ddpm.yaml
+  - data: test-div2k          # configs/data/test-div2k.yaml
+  - task: down_sampling        # configs/task/super_resolution.yaml
+  - model: div2k256ddpm       # configs/model/div2k256ddpm.yaml
   - sampler: edm_daps        # configs/sampler/edm_daps.yaml
   - _self_  
 
 # Experiment settings
 gpu: 0
-batch_size: 10
-num_runs: 2
+batch_size: 5
+num_runs: 1
 save_dir: ./results
-name: daps_phase_retrieval_ffhq_test_30
+name: daps_super_resolution_div2k
 
 # Task configuration
 task_group: pixel  # pixel, sd, or latent
 
 # Evaluation
 eval_fn_list: ['psnr', 'ssim', 'lpips']
-eval_fid: False
-show_eval: False
+eval_fid: True
+show_eval: True
 
 # Save options
 save_samples: True

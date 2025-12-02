@@ -196,6 +196,13 @@ def main(args):
 
     # get model
     model = get_model(**args.model)
+    model.model.model.attention_resolutions = {16} # for memory efficiency
+    # check if model and measurements are on the same device
+    print("Model device:", next(model.parameters()).device)
+    print("Measurements device:", y.device)
+    if next(model.parameters()).device != y.device:
+        model = model.to(y.device)
+        print("Moved model to measurements device.")
 
     # get evaluator
     eval_fn_list = []
@@ -221,6 +228,7 @@ def main(args):
     # ======================== Main Sampling Loop ========================
     full_samples = []
     full_trajs = []
+    input("Press Enter to start sampling...")
     for r in range(args.num_runs):
         print(f"Run: {r}")
         x_start = sampler.get_start(images.shape[0], model)

@@ -1,0 +1,5 @@
+name: image
+root: 'dataset/DIV2K_train_HR'
+resolution: 256
+start_id: 0
+end_id: 10
