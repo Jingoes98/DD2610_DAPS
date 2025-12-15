@@ -2,6 +2,16 @@ import json
 import os
 import yaml
 import torch
+
+print("======= PYTORCH BACKEND CHECK =======")
+print("Torch version:", torch.__version__)
+print("CUDA version:", torch.version.cuda)
+print("cuDNN version:", torch.backends.cudnn.version())
+print("TF32 matmul:", torch.backends.cuda.matmul.allow_tf32)
+print("TF32 cudnn:", torch.backends.cudnn.allow_tf32)
+print("cudnn.benchmark:", torch.backends.cudnn.benchmark)
+print("======================================")
+
 from torchvision.utils import save_image
 from forward_operator import get_operator
 from data import get_dataset
@@ -232,6 +242,14 @@ def main(args):
     for r in range(args.num_runs):
         print(f"Run: {r}")
         x_start = sampler.get_start(images.shape[0], model)
+
+        # debug info
+        print("xt_0 stats:",
+                x_start.min().item(),
+                x_start.max().item(),
+                x_start.mean().item(),
+                x_start.std().item())
+
         samples, trajs = sample_in_batch(sampler, model, x_start,
                                          operator, y, evaluator,
                                          verbose=True, record=args.save_traj,
